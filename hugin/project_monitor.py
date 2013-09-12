@@ -33,12 +33,16 @@ PROJECT_COMPLETION_STEPS = ["all raw data delivered",
 
 SEQUENCING_IN_PROGRESS = "Sequencing"
 BCBB_ANALYSIS_IN_PROGRESS = "bcbb analysis"
-BP_AND_DELIVERY_IN_PROGRESS = "Best practice and delivery"
+DELIVERY_IN_PROGRESS = "Delivery"
+BP_IN_PROGRESS = "Best practice"
 PROJECT_FINISHED = "Finished"
 STALLED = "Check status"
+ABORTED = "Aborted"
 
 # The number of seconds we allow the bcbb logfile to be inactive before we flag the project as stalled
-BCBB_LOGFILE_INACTIVE = 60*60*3
+BCBB_LOGFILE_INACTIVE = datetime.timedelta(seconds=60*60*3)
+BCBB_ANALYSIS_DURATION = datetime.timedelta(seconds=60*60*24*2)
+DELIVERY_DURATION = datetime.timedelta(seconds=60*60*24*5)
 
 class ProjectMonitor(Monitor):
     
@@ -84,7 +88,7 @@ class ProjectMonitor(Monitor):
     def get_run_status(self, run):
         """Check if all projects and samples in a run has been transferred to the analysis folder
         """
-        ssheet = self.get_run_samplesheet(run)
+        ssheet = run['samplesheet']
         if ssheet is None:
             print("Could not locate samplesheet for run {}".format(run['name']))
             return False
@@ -118,7 +122,7 @@ class ProjectMonitor(Monitor):
         """Mark the bcbb analysis as started for a project and run"""
         try:
             [chklist] = [c for c in card.checklists if c.name == chklist_name]
-            
+            chklist.set_checklist_item(item_name,state)
         except ValueError:
             return None
         
@@ -190,3 +194,59 @@ class ProjectMonitor(Monitor):
                            }
                 projects.append(project)
         return projects
+    
+    def update_trello_board(self):
+        """Update the Trello board based on the contents of the analysis folder"""
+         # Don't update the card if it is in any of these lists
+        skip_list_ids = [self.trello.get_list_id(self.trello_board,PROJECT_FINISHED),
+                         self.trello.get_list_id(self.trello_board,ABORTED)]
+        projects = self.list_projects()
+        for project in projects:
+            print("Adding project {}".format(project['name']))
+            status, due = self.get_status_due(project)
+      
+            # If due time has passed, set status to stalled
+            if due < datetime.datetime.utcnow():
+                status = STALLED
+                
+            card = self.trello.get_card_on_board(self.trello_board,project['name'])
+            # Don't create any new cards, rely on these being created by the run_monitor process
+            if card is None:
+                continue
+            
+            # Gather the information on the project and update the description on the card as necessary
+            metadata = self.get_project_metadata(project)
+            self.set_description(card,metadata,True)
+            self.set_due(card,due)
+            
+            # If the card was moved to the STALLED list, send a notification                
+            if self.trello.change_list(card, status, skip_list_ids) and status == STALLED:
+                users = [self.trello.client.get_member(mid) for mid in card.member_ids]
+                self.send_status_notification(project,status,users)
+            
+    def get_status_due(self, project):
+        """Determine the processing status of a project
+        """
+        status_flags = ["01_analysis_start.txt",
+                        "project-summary.csv"]
+        statuses = {}
+        for sample in project["samples"]:
+            for flowcell in sample["flowcells"]:
+                status = STALLED
+                if flowcell["name"] not in statuses:
+                    statuses[flowcell["name"]] = []
+                if os.path.exists(os.path.join(flowcell["path"],status_flags[1])):
+                    status = DELIVERY_IN_PROGRESS
+                    due = datetime.datetime.fromtimestamp(os.path.getmtime(os.path.join(flowcell["path"],
+                                                                                        status_flags[1]))) + DELIVERY_DURATION
+                elif os.path.exists(os.path.join(flowcell["path"],status_flags[0])):
+                    logfile = os.path.join(flowcell["path"],"{}-bcbb.log".format(sample["name"]))
+                    due = datetime.datetime.utcnow()
+                    if os.path.exists(logfile) and due - datetime.datetime.fromtimestamp(os.path.getmtime(logfile)) < BCBB_LOGFILE_INACTIVE:
+                         status = BCBB_ANALYSIS_IN_PROGRESS
+                         due = datetime.datetime.fromtimestamp(os.path.getmtime(os.path.join(flowcell["path"],
+                                                                                             status_flags[0]))) + BCBB_ANALYSIS_DURATION
+                statuses[flowcell["name"]].append([status,due])
+        
+        return None, None
+            
