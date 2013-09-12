@@ -27,6 +27,7 @@ class RunMonitor(Monitor):
         assert self.trello_board is not None, "Could not locate run tracking board in Trello"
         self.run_folders = [d.strip() for d in config.get("run_folders","").split(",")]
         self.samplesheet_folders = [d.strip() for d in config.get("samplesheet_folders","").split(",")]
+        self.instruments = config.get("instruments", {})
         
     def set_run_completed(self, run):
         """Set the status of the run to completed"""
@@ -145,8 +146,10 @@ class RunMonitor(Monitor):
             print("Adding run {}".format(run['name']))
             status, due = self.get_status_due(run)
             
-            # If due time has passed, set status to stalled
-            if due < datetime.datetime.utcnow():
+            # If due time has passed and didn't find all status files, set status to stalled.
+            # if status == UPPMAX means that the processing has finished, and should have more
+            # priority than due date
+            if due < datetime.datetime.utcnow() and status != UPPMAX:
                 status = STALLED
                 
             card = self.trello.get_card_on_board(self.trello_board,run['name'])
@@ -194,7 +197,12 @@ class RunMonitor(Monitor):
         metadata['Projects'] = run['projects']
         metadata['Setup'] = self.get_run_setup(run) 
         metadata['Flowcell'] = run['run_info'].get('Flowcell','NA')
-        metadata['Instrument'] = run['run_info'].get('Instrument','NA')
+        instrument = run['run_info'].get('Instrument','NA')
+        if self.instruments:
+            instrument_name = self.instruments.get(instrument, '')
+            if instrument_name:
+                instrument += " ({name})".format(name=instrument_name)
+        metadata['Instrument'] = instrument
         metadata['Date'] = run['run_info'].get('Date','NA')      
         metadata['Run mode'] = run['run_parameters'].get('RunMode','HighOutput' if not self.is_miseq_run(run) else 'MiSeq')  
         return metadata
